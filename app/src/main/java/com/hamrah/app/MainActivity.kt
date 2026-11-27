@@ -83,7 +83,7 @@ private fun requiredPermissions(): Array<String> {
 }
 
 private fun formatTime(timestamp: Long): String {
-    return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+    return SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(Date(timestamp))
 }
 
 @Composable
@@ -121,8 +121,11 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
     if (currentChat != null) {
         val chatDevice: ConnectedDevice? =
             connected.firstOrNull { device -> device.endpointId == currentChat }
-        val chatMessages: List<ChatMessage> =
-            messages.filter { message -> message.endpointId == currentChat }
+        val chatPeerName: String = chatDevice?.name ?: ""
+        val chatMessages: List<ChatMessage> = messages.filter { message ->
+            message.endpointId == currentChat ||
+                (chatPeerName.isNotEmpty() && message.peerName == chatPeerName)
+        }
         ChatScreen(
             deviceName = chatDevice?.name ?: "Disconnected device",
             isConnected = chatDevice != null,
