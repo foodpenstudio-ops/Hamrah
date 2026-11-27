@@ -11,6 +11,7 @@ class HamrahViewModel(application: Application) : AndroidViewModel(application) 
     val discovered = manager.discovered
     val pending = manager.pending
     val connected = manager.connected
+    val messages = manager.messages
     val status = manager.status
     val running = manager.running
 
@@ -20,6 +21,7 @@ class HamrahViewModel(application: Application) : AndroidViewModel(application) 
     fun accept(endpointId: String) = manager.accept(endpointId)
     fun reject(endpointId: String) = manager.reject(endpointId)
     fun disconnect(endpointId: String) = manager.disconnect(endpointId)
+    fun send(endpointId: String, text: String) = manager.sendMessage(endpointId, text)
 
     override fun onCleared() {
         manager.stop()
