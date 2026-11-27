@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import org.json.JSONObject
+import java.util.UUID
 
 data class DiscoveredDevice(val endpointId: String, val name: String)
 
@@ -31,10 +33,24 @@ data class PendingRequest(
 
 data class ConnectedDevice(val endpointId: String, val name: String)
 
+enum class MessageStatus { PENDING, DELIVERED, FAILED, RECEIVED }
+
+data class ChatMessage(
+    val id: String,
+    val endpointId: String,
+    val senderName: String,
+    val text: String,
+    val timestamp: Long,
+    val mine: Boolean,
+    val status: MessageStatus
+)
+
 class NearbyConnectionManager(context: Context) {
 
     companion object {
         const val SERVICE_ID = "com.hamrah.app.nearby"
+        const val MAX_MESSAGE_LENGTH = 1000
+        const val MAX_PAYLOAD_BYTES = 8192
     }
 
     private val client: ConnectionsClient =
@@ -43,6 +59,9 @@ class NearbyConnectionManager(context: Context) {
     private val strategy = Strategy.P2P_CLUSTER
 
     private var localName: String = "Hamrah user"
+
+    // Remembers which sent payload belongs to which message.
+    private val outgoing = mutableMapOf<Long, String>()
 
     private val _discovered = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
     val discovered: StateFlow<List<DiscoveredDevice>> = _discovered.asStateFlow()
@@ -53,22 +72,75 @@ class NearbyConnectionManager(context: Context) {
     private val _connected = MutableStateFlow<List<ConnectedDevice>>(emptyList())
     val connected: StateFlow<List<ConnectedDevice>> = _connected.asStateFlow()
 
+    private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
+
     private val _status = MutableStateFlow("Not started")
     val status: StateFlow<String> = _status.asStateFlow()
 
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
 
+    private fun setMessageStatus(messageId: String, newStatus: MessageStatus) {
+        _messages.update { list ->
+            list.map { m -> if (m.id == messageId) m.copy(status = newStatus) else m }
+        }
+    }
+
     private val payloadCallback = object : PayloadCallback() {
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
-            // Messages will be handled in Phase 3.
+            if (payload.type != Payload.Type.BYTES) return
+            val bytes = payload.asBytes() ?: return
+            if (bytes.size > MAX_PAYLOAD_BYTES) return
+
+            try {
+                val json = JSONObject(String(bytes, Charsets.UTF_8))
+                if (json.optString("t") != "msg") return
+
+                val id = json.optString("id").trim()
+                val text = json.optString("text").trim()
+                if (id.isEmpty() || id.length > 64) return
+                if (text.isEmpty() || text.length > MAX_MESSAGE_LENGTH) return
+
+                if (_messages.value.any { m -> m.id == id }) return
+
+                val senderName = _connected.value
+                    .firstOrNull { d -> d.endpointId == endpointId }?.name ?: "Unknown"
+
+                val message = ChatMessage(
+                    id = id,
+                    endpointId = endpointId,
+                    senderName = senderName,
+                    text = text,
+                    timestamp = System.currentTimeMillis(),
+                    mine = false,
+                    status = MessageStatus.RECEIVED
+                )
+                _messages.update { list -> list + message }
+            } catch (e: Exception) {
+                // Ignore anything that is not a valid Hamrah message.
+            }
         }
 
         override fun onPayloadTransferUpdate(
             endpointId: String,
             update: PayloadTransferUpdate
         ) {
-            // Not needed yet.
+            val messageId = outgoing[update.payloadId] ?: return
+            when (update.status) {
+                PayloadTransferUpdate.Status.SUCCESS -> {
+                    setMessageStatus(messageId, MessageStatus.DELIVERED)
+                    outgoing.remove(update.payloadId)
+                }
+                PayloadTransferUpdate.Status.FAILURE,
+                PayloadTransferUpdate.Status.CANCELED -> {
+                    setMessageStatus(messageId, MessageStatus.FAILED)
+                    outgoing.remove(update.payloadId)
+                }
+                else -> {
+                    // Still in progress.
+                }
+            }
         }
     }
 
@@ -161,6 +233,7 @@ class NearbyConnectionManager(context: Context) {
         _discovered.value = emptyList()
         _pending.value = emptyList()
         _connected.value = emptyList()
+        outgoing.clear()
         _running.value = false
         _status.value = "Stopped"
     }
@@ -188,5 +261,35 @@ class NearbyConnectionManager(context: Context) {
     fun disconnect(endpointId: String) {
         client.disconnectFromEndpoint(endpointId)
         _connected.update { list -> list.filter { it.endpointId != endpointId } }
+    }
+
+    fun sendMessage(endpointId: String, text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty() || clean.length > MAX_MESSAGE_LENGTH) return
+
+        val id = UUID.randomUUID().toString()
+        val json = JSONObject()
+            .put("t", "msg")
+            .put("id", id)
+            .put("text", clean)
+        val payload = Payload.fromBytes(json.toString().toByteArray(Charsets.UTF_8))
+
+        val message = ChatMessage(
+            id = id,
+            endpointId = endpointId,
+            senderName = localName,
+            text = clean,
+            timestamp = System.currentTimeMillis(),
+            mine = true,
+            status = MessageStatus.PENDING
+        )
+        _messages.update { list -> list + message }
+        outgoing[payload.id] = id
+
+        client.sendPayload(endpointId, payload)
+            .addOnFailureListener {
+                outgoing.remove(payload.id)
+                setMessageStatus(id, MessageStatus.FAILED)
+            }
     }
 }
