@@ -36,6 +36,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hamrah.app.network.ConnectedDevice
+import com.hamrah.app.network.DiscoveredDevice
+import com.hamrah.app.network.PendingRequest
 import com.hamrah.app.viewmodel.HamrahViewModel
 
 class MainActivity : ComponentActivity() {
@@ -72,19 +75,19 @@ private fun requiredPermissions(): Array<String> {
 
 @Composable
 fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
-    val discovered by vm.discovered.collectAsStateWithLifecycle()
-    val pending by vm.pending.collectAsStateWithLifecycle()
-    val connected by vm.connected.collectAsStateWithLifecycle()
-    val status by vm.status.collectAsStateWithLifecycle()
-    val running by vm.running.collectAsStateWithLifecycle()
+    val discovered: List<DiscoveredDevice> by vm.discovered.collectAsStateWithLifecycle()
+    val pending: List<PendingRequest> by vm.pending.collectAsStateWithLifecycle()
+    val connected: List<ConnectedDevice> by vm.connected.collectAsStateWithLifecycle()
+    val status: String by vm.status.collectAsStateWithLifecycle()
+    val running: Boolean by vm.running.collectAsStateWithLifecycle()
 
     var deviceName by rememberSaveable { mutableStateOf(Build.MODEL ?: "My phone") }
     var permissionMessage by rememberSaveable { mutableStateOf("") }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        if (results.values.all { it }) {
+    ) { results: Map<String, Boolean> ->
+        if (results.values.all { granted -> granted }) {
             permissionMessage = ""
             vm.start(deviceName)
         } else {
@@ -94,7 +97,9 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
         }
     }
 
-    val connectedIds = connected.map { it.endpointId }.toSet()
+    val connectedIds: Set<String> = connected.map { device -> device.endpointId }.toSet()
+    val nearby: List<DiscoveredDevice> =
+        discovered.filter { device -> device.endpointId !in connectedIds }
 
     Column(
         modifier = Modifier
@@ -112,7 +117,7 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
 
         OutlinedTextField(
             value = deviceName,
-            onValueChange = { deviceName = it },
+            onValueChange = { newValue: String -> deviceName = newValue },
             label = { Text("Your device name") },
             singleLine = true,
             enabled = !running,
@@ -153,7 +158,10 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
             if (pending.isEmpty()) {
                 item { Text("None", style = MaterialTheme.typography.bodyMedium) }
             }
-            items(pending, key = { "p" + it.endpointId }) { request ->
+            items(
+                items = pending,
+                key = { request: PendingRequest -> "p" + request.endpointId }
+            ) { request: PendingRequest ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(request.name, style = MaterialTheme.typography.titleSmall)
@@ -181,7 +189,10 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
             if (connected.isEmpty()) {
                 item { Text("None", style = MaterialTheme.typography.bodyMedium) }
             }
-            items(connected, key = { "c" + it.endpointId }) { device ->
+            items(
+                items = connected,
+                key = { device: ConnectedDevice -> "c" + device.endpointId }
+            ) { device: ConnectedDevice ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier
@@ -202,7 +213,6 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("Nearby phones", style = MaterialTheme.typography.titleMedium)
             }
-            val nearby = discovered.filter { it.endpointId !in connectedIds }
             if (nearby.isEmpty()) {
                 item {
                     Text(
@@ -211,7 +221,10 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
                     )
                 }
             }
-            items(nearby, key = { "d" + it.endpointId }) { device ->
+            items(
+                items = nearby,
+                key = { device: DiscoveredDevice -> "d" + device.endpointId }
+            ) { device: DiscoveredDevice ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier
