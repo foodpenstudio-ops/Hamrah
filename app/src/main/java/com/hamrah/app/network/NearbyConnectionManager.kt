@@ -15,10 +15,17 @@ import com.google.android.gms.nearby.connection.Payload
 import com.google.android.gms.nearby.connection.PayloadCallback
 import com.google.android.gms.nearby.connection.PayloadTransferUpdate
 import com.google.android.gms.nearby.connection.Strategy
+import com.hamrah.app.data.local.MessageDao
+import com.hamrah.app.data.local.MessageDatabase
+import com.hamrah.app.data.local.MessageEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.UUID
 
@@ -42,7 +49,8 @@ data class ChatMessage(
     val text: String,
     val timestamp: Long,
     val mine: Boolean,
-    val status: MessageStatus
+    val status: MessageStatus,
+    val peerName: String = ""
 )
 
 class NearbyConnectionManager(context: Context) {
@@ -55,6 +63,9 @@ class NearbyConnectionManager(context: Context) {
 
     private val client: ConnectionsClient =
         Nearby.getConnectionsClient(context.applicationContext)
+
+    private val dao: MessageDao = MessageDatabase.get(context).messageDao()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val strategy = Strategy.P2P_CLUSTER
 
@@ -81,9 +92,77 @@ class NearbyConnectionManager(context: Context) {
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
 
+    init {
+        loadHistory()
+    }
+
+    private fun loadHistory() {
+        scope.launch {
+            try {
+                val saved: List<MessageEntity> = dao.getAll()
+                val loaded: List<ChatMessage> = saved.map { entity ->
+                    var status = try {
+                        MessageStatus.valueOf(entity.status)
+                    } catch (e: Exception) {
+                        MessageStatus.FAILED
+                    }
+                    // A message still pending from an earlier session was never confirmed.
+                    if (status == MessageStatus.PENDING) {
+                        status = MessageStatus.FAILED
+                        dao.updateStatus(entity.id, MessageStatus.FAILED.name)
+                    }
+                    ChatMessage(
+                        id = entity.id,
+                        endpointId = "",
+                        senderName = entity.senderName,
+                        text = entity.text,
+                        timestamp = entity.timestamp,
+                        mine = entity.mine,
+                        status = status,
+                        peerName = entity.peerName
+                    )
+                }
+                _messages.update { current ->
+                    val currentIds = current.map { m -> m.id }.toSet()
+                    (loaded.filter { m -> m.id !in currentIds } + current)
+                        .sortedBy { m -> m.timestamp }
+                }
+            } catch (e: Exception) {
+                _status.value = "Could not load saved messages"
+            }
+        }
+    }
+
+    private fun saveMessage(message: ChatMessage) {
+        scope.launch {
+            try {
+                dao.insert(
+                    MessageEntity(
+                        id = message.id,
+                        peerName = message.peerName,
+                        senderName = message.senderName,
+                        text = message.text,
+                        timestamp = message.timestamp,
+                        mine = message.mine,
+                        status = message.status.name
+                    )
+                )
+            } catch (e: Exception) {
+                // Saving failed; the message is still shown on screen.
+            }
+        }
+    }
+
     private fun setMessageStatus(messageId: String, newStatus: MessageStatus) {
         _messages.update { list ->
             list.map { m -> if (m.id == messageId) m.copy(status = newStatus) else m }
+        }
+        scope.launch {
+            try {
+                dao.updateStatus(messageId, newStatus.name)
+            } catch (e: Exception) {
+                // Ignore storage problems.
+            }
         }
     }
 
@@ -114,9 +193,11 @@ class NearbyConnectionManager(context: Context) {
                     text = text,
                     timestamp = System.currentTimeMillis(),
                     mine = false,
-                    status = MessageStatus.RECEIVED
+                    status = MessageStatus.RECEIVED,
+                    peerName = senderName
                 )
                 _messages.update { list -> list + message }
+                saveMessage(message)
             } catch (e: Exception) {
                 // Ignore anything that is not a valid Hamrah message.
             }
@@ -267,6 +348,9 @@ class NearbyConnectionManager(context: Context) {
         val clean = text.trim()
         if (clean.isEmpty() || clean.length > MAX_MESSAGE_LENGTH) return
 
+        val peerName = _connected.value
+            .firstOrNull { d -> d.endpointId == endpointId }?.name ?: "Unknown"
+
         val id = UUID.randomUUID().toString()
         val json = JSONObject()
             .put("t", "msg")
@@ -281,9 +365,11 @@ class NearbyConnectionManager(context: Context) {
             text = clean,
             timestamp = System.currentTimeMillis(),
             mine = true,
-            status = MessageStatus.PENDING
+            status = MessageStatus.PENDING,
+            peerName = peerName
         )
         _messages.update { list -> list + message }
+        saveMessage(message)
         outgoing[payload.id] = id
 
         client.sendPayload(endpointId, payload)
