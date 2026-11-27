@@ -56,12 +56,8 @@ class MainActivity : ComponentActivity() {
 
 private fun requiredPermissions(): Array<String> {
     val list = mutableListOf<String>()
-    if (Build.VERSION.SDK_INT <= 28) {
-        list.add(Manifest.permission.ACCESS_COARSE_LOCATION)
-    }
-    if (Build.VERSION.SDK_INT in 29..31) {
-        list.add(Manifest.permission.ACCESS_FINE_LOCATION)
-    }
+    list.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+    list.add(Manifest.permission.ACCESS_FINE_LOCATION)
     if (Build.VERSION.SDK_INT >= 31) {
         list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
         list.add(Manifest.permission.BLUETOOTH_CONNECT)
