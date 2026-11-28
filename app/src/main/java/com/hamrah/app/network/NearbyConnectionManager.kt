@@ -29,42 +29,6 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.UUID
 
-data class DiscoveredDevice(val endpointId: String, val name: String)
-
-data class PendingRequest(
-    val endpointId: String,
-    val name: String,
-    val code: String,
-    val incoming: Boolean
-)
-
-data class ConnectedDevice(val endpointId: String, val name: String)
-
-enum class MessageStatus { PENDING, DELIVERED, FAILED, RECEIVED }
-
-data class ChatMessage(
-    val id: String,
-    val endpointId: String,
-    val senderName: String,
-    val text: String,
-    val timestamp: Long,
-    val mine: Boolean,
-    val status: MessageStatus,
-    val peerName: String = ""
-)
-
-data class EmergencyAlert(
-    val id: String,
-    val endpointId: String,
-    val senderName: String,
-    val text: String,
-    val timestamp: Long,
-    val mine: Boolean,
-    val cancelled: Boolean = false,
-    val acknowledgedBy: List<String> = emptyList(),
-    val acknowledgedByMe: Boolean = false
-)
-
 class NearbyConnectionManager(context: Context) {
 
     companion object {
@@ -86,7 +50,6 @@ class NearbyConnectionManager(context: Context) {
     private var localName: String = "Hamrah user"
     private var lastSosTime: Long = 0L
 
-    // Remembers which sent payload belongs to which message.
     private val outgoing = mutableMapOf<Long, String>()
 
     private val _discovered = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
@@ -103,6 +66,9 @@ class NearbyConnectionManager(context: Context) {
 
     private val _alerts = MutableStateFlow<List<EmergencyAlert>>(emptyList())
     val alerts: StateFlow<List<EmergencyAlert>> = _alerts.asStateFlow()
+
+    private val _locations = MutableStateFlow<List<SharedLocation>>(emptyList())
+    val locations: StateFlow<List<SharedLocation>> = _locations.asStateFlow()
 
     private val _status = MutableStateFlow("Not started")
     val status: StateFlow<String> = _status.asStateFlow()
@@ -124,7 +90,6 @@ class NearbyConnectionManager(context: Context) {
                     } catch (e: Exception) {
                         MessageStatus.FAILED
                     }
-                    // A message still pending from an earlier session was never confirmed.
                     if (status == MessageStatus.PENDING) {
                         status = MessageStatus.FAILED
                         dao.updateStatus(entity.id, MessageStatus.FAILED.name)
@@ -166,7 +131,7 @@ class NearbyConnectionManager(context: Context) {
                     )
                 )
             } catch (e: Exception) {
-                // Saving failed; the message is still shown on screen.
+                // The message is still shown on screen.
             }
         }
     }
@@ -248,9 +213,35 @@ class NearbyConnectionManager(context: Context) {
     private fun handleCancel(endpointId: String, json: JSONObject) {
         val id = json.optString("id").trim()
         val alert = _alerts.value.firstOrNull { a -> a.id == id && !a.mine } ?: return
-        // Only the phone that sent the alert may cancel it.
         if (alert.endpointId != endpointId) return
         updateAlert(id) { a -> a.copy(cancelled = true) }
+    }
+
+    private fun handleLocation(endpointId: String, json: JSONObject) {
+        val lat = json.optDouble("lat", Double.NaN)
+        val lon = json.optDouble("lon", Double.NaN)
+        val acc = json.optDouble("acc", 0.0)
+        if (lat.isNaN() || lon.isNaN() || acc.isNaN()) return
+        if (lat < -90.0 || lat > 90.0) return
+        if (lon < -180.0 || lon > 180.0) return
+        if (acc < 0.0 || acc > 1_000_000.0) return
+
+        val senderName = peerNameFor(endpointId)
+        val location = SharedLocation(
+            senderName = senderName,
+            latitude = lat,
+            longitude = lon,
+            accuracyMeters = acc.toFloat(),
+            timestamp = System.currentTimeMillis()
+        )
+        _locations.update { list ->
+            list.filter { l -> l.senderName != senderName } + location
+        }
+    }
+
+    private fun handleLocationStopped(endpointId: String) {
+        val senderName = peerNameFor(endpointId)
+        _locations.update { list -> list.filter { l -> l.senderName != senderName } }
     }
 
     private val payloadCallback = object : PayloadCallback() {
@@ -266,6 +257,8 @@ class NearbyConnectionManager(context: Context) {
                     "sos" -> handleSos(endpointId, json)
                     "ack" -> handleAck(endpointId, json)
                     "cancel" -> handleCancel(endpointId, json)
+                    "loc" -> handleLocation(endpointId, json)
+                    "locstop" -> handleLocationStopped(endpointId)
                     else -> {
                         // Unknown type: ignore.
                     }
@@ -337,6 +330,7 @@ class NearbyConnectionManager(context: Context) {
             val name = _connected.value.firstOrNull { it.endpointId == endpointId }?.name
                 ?: "device"
             _connected.update { list -> list.filter { it.endpointId != endpointId } }
+            _locations.update { list -> list.filter { l -> l.senderName != name } }
             _status.value = "Disconnected from $name"
         }
     }
@@ -386,6 +380,7 @@ class NearbyConnectionManager(context: Context) {
         _discovered.value = emptyList()
         _pending.value = emptyList()
         _connected.value = emptyList()
+        _locations.value = emptyList()
         outgoing.clear()
         _running.value = false
         _status.value = "Stopped"
@@ -414,9 +409,7 @@ class NearbyConnectionManager(context: Context) {
     fun disconnect(endpointId: String) {
         client.disconnectFromEndpoint(endpointId)
         _connected.update { list -> list.filter { it.endpointId != endpointId } }
-    }
-
-    fun sendMessage(endpointId: String, text: String) {
+    }    fun sendMessage(endpointId: String, text: String) {
         val clean = text.trim()
         if (clean.isEmpty() || clean.length > MAX_MESSAGE_LENGTH) return
 
@@ -516,5 +509,27 @@ class NearbyConnectionManager(context: Context) {
             .put("id", alertId)
         val payload = Payload.fromBytes(json.toString().toByteArray(Charsets.UTF_8))
         client.sendPayload(alert.endpointId, payload)
+    }
+
+    fun sendLocation(latitude: Double, longitude: Double, accuracyMeters: Float) {
+        val targets: List<String> = _connected.value.map { d -> d.endpointId }
+        if (targets.isEmpty()) return
+
+        val json = JSONObject()
+            .put("t", "loc")
+            .put("lat", latitude)
+            .put("lon", longitude)
+            .put("acc", accuracyMeters.toDouble())
+        val payload = Payload.fromBytes(json.toString().toByteArray(Charsets.UTF_8))
+        client.sendPayload(targets, payload)
+    }
+
+    fun sendLocationStopped() {
+        val targets: List<String> = _connected.value.map { d -> d.endpointId }
+        if (targets.isEmpty()) return
+
+        val json = JSONObject().put("t", "locstop")
+        val payload = Payload.fromBytes(json.toString().toByteArray(Charsets.UTF_8))
+        client.sendPayload(targets, payload)
     }
 }
