@@ -34,6 +34,7 @@ import com.hamrah.app.network.ConnectedDevice
 import com.hamrah.app.network.DiscoveredDevice
 import com.hamrah.app.network.EmergencyAlert
 import com.hamrah.app.network.PendingRequest
+import com.hamrah.app.network.SharedLocation
 import com.hamrah.app.viewmodel.HamrahViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -78,6 +79,9 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
     val connected: List<ConnectedDevice> by vm.connected.collectAsStateWithLifecycle()
     val messages: List<ChatMessage> by vm.messages.collectAsStateWithLifecycle()
     val alerts: List<EmergencyAlert> by vm.alerts.collectAsStateWithLifecycle()
+    val locations: List<SharedLocation> by vm.locations.collectAsStateWithLifecycle()
+    val sharing: Boolean by vm.sharingLocation.collectAsStateWithLifecycle()
+    val locationMessage: String by vm.locationMessage.collectAsStateWithLifecycle()
     val status: String by vm.status.collectAsStateWithLifecycle()
     val running: Boolean by vm.running.collectAsStateWithLifecycle()
 
@@ -85,6 +89,7 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
     var permissionMessage by rememberSaveable { mutableStateOf("") }
     var chatWith by rememberSaveable { mutableStateOf<String?>(null) }
     var showSos by rememberSaveable { mutableStateOf(false) }
+    var showLocation by rememberSaveable { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -96,6 +101,16 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
             permissionMessage =
                 "Hamrah needs these permissions to find and connect to nearby phones. " +
                     "Tap Start again and allow them."
+        }
+    }
+
+    val locationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results: Map<String, Boolean> ->
+        if (results[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
+            vm.startSharingLocation()
+        } else {
+            vm.locationPermissionDenied()
         }
     }
 
@@ -159,6 +174,23 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
                     onAcknowledge = { id: String -> vm.acknowledgeAlert(id) },
                     onBack = { showSos = false }
                 )
+            } else if (showLocation) {
+                LocationScreen(
+                    sharing = sharing,
+                    message = locationMessage,
+                    connectedCount = connected.size,
+                    locations = locations,
+                    onStartShare = {
+                        locationLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                Manifest.permission.ACCESS_COARSE_LOCATION
+                            )
+                        )
+                    },
+                    onStopShare = { vm.stopSharingLocation() },
+                    onBack = { showLocation = false }
+                )
             } else if (currentChat != null) {
                 val chatDevice: ConnectedDevice? =
                     connected.firstOrNull { device -> device.endpointId == currentChat }
@@ -185,6 +217,7 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
                     connected = connected,
                     nearby = nearby,
                     onSos = { showSos = true },
+                    onLocation = { showLocation = true },
                     onStart = { permissionLauncher.launch(requiredPermissions()) },
                     onStop = { vm.stop() },
                     onAccept = { id: String -> vm.accept(id) },
