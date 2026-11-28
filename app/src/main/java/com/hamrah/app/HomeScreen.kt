@@ -39,6 +39,7 @@ fun HomeScreen(
     nearby: List<DiscoveredDevice>,
     onSos: () -> Unit,
     onLocation: () -> Unit,
+    onSettings: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onAccept: (String) -> Unit,
@@ -78,10 +79,19 @@ fun HomeScreen(
         }
         Spacer(modifier = Modifier.height(8.dp))
 
-        OutlinedButton(
-            onClick = onLocation,
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("Location sharing") }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onLocation,
+                modifier = Modifier.weight(1f)
+            ) { Text("Location sharing") }
+            OutlinedButton(
+                onClick = onSettings,
+                modifier = Modifier.weight(1f)
+            ) { Text("Settings") }
+        }
         Spacer(modifier = Modifier.height(12.dp))
 
         OutlinedTextField(
