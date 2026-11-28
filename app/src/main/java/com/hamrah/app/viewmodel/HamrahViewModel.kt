@@ -3,12 +3,16 @@ package com.hamrah.app.viewmodel
 import android.annotation.SuppressLint
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
 import android.os.Looper
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
+import com.hamrah.app.ConnectionService
+import com.hamrah.app.HamrahApplication
 import com.hamrah.app.network.NearbyConnectionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,7 +20,9 @@ import kotlinx.coroutines.flow.asStateFlow
 
 class HamrahViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val manager = NearbyConnectionManager(application)
+    private val manager: NearbyConnectionManager =
+        (application as HamrahApplication).connectionManager
+
     private val locationManager: LocationManager =
         application.getSystemService(Context.LOCATION_SERVICE) as LocationManager
 
@@ -51,11 +57,28 @@ class HamrahViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun start(deviceName: String) = manager.start(deviceName)
+    fun start(deviceName: String) {
+        manager.start(deviceName)
+        try {
+            val app: Application = getApplication()
+            ContextCompat.startForegroundService(
+                app,
+                Intent(app, ConnectionService::class.java)
+            )
+        } catch (e: Exception) {
+            // Hamrah still works while the app is open.
+        }
+    }
 
     fun stop() {
         stopSharingLocation()
         manager.stop()
+        try {
+            val app: Application = getApplication()
+            app.stopService(Intent(app, ConnectionService::class.java))
+        } catch (e: Exception) {
+            // Nothing to stop.
+        }
     }
 
     fun connect(endpointId: String) = manager.requestConnection(endpointId)
@@ -130,12 +153,8 @@ class HamrahViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
-        try {
-            locationManager.removeUpdates(locationListener)
-        } catch (e: Exception) {
-            // Nothing to clean up.
-        }
-        manager.stop()
+        // Location sharing ends when the screen is closed; the connection stays alive.
+        stopSharingLocation()
         super.onCleared()
     }
 }
