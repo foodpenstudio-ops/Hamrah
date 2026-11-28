@@ -64,6 +64,7 @@ private fun requiredPermissions(): Array<String> {
     }
     if (Build.VERSION.SDK_INT >= 33) {
         list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        list.add(Manifest.permission.POST_NOTIFICATIONS)
     }
     return list.toTypedArray()
 }
@@ -94,7 +95,10 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results: Map<String, Boolean> ->
-        if (results.values.all { granted -> granted }) {
+        // Notifications are optional; every other permission is required.
+        val needed: Map<String, Boolean> =
+            results.filterKeys { name -> name != Manifest.permission.POST_NOTIFICATIONS }
+        if (needed.values.all { granted -> granted }) {
             permissionMessage = ""
             vm.start(deviceName)
         } else {
