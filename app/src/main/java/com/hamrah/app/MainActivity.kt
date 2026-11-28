@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,9 +20,12 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -44,9 +48,25 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            var themeMode by remember {
+                mutableStateOf(ThemePreference.load(this@MainActivity))
+            }
+            val useDark: Boolean = when (themeMode) {
+                1 -> false
+                2 -> true
+                else -> isSystemInDarkTheme()
+            }
+            MaterialTheme(
+                colorScheme = if (useDark) darkColorScheme() else lightColorScheme()
+            ) {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    NearbyScreen()
+                    NearbyScreen(
+                        themeMode = themeMode,
+                        onThemeChange = { mode: Int ->
+                            ThemePreference.save(this@MainActivity, mode)
+                            themeMode = mode
+                        }
+                    )
                 }
             }
         }
@@ -74,7 +94,11 @@ internal fun formatTime(timestamp: Long): String {
 }
 
 @Composable
-fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
+fun NearbyScreen(
+    themeMode: Int,
+    onThemeChange: (Int) -> Unit,
+    vm: HamrahViewModel = viewModel()
+) {
     val discovered: List<DiscoveredDevice> by vm.discovered.collectAsStateWithLifecycle()
     val pending: List<PendingRequest> by vm.pending.collectAsStateWithLifecycle()
     val connected: List<ConnectedDevice> by vm.connected.collectAsStateWithLifecycle()
@@ -91,11 +115,12 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
     var chatWith by rememberSaveable { mutableStateOf<String?>(null) }
     var showSos by rememberSaveable { mutableStateOf(false) }
     var showLocation by rememberSaveable { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showAbout by rememberSaveable { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results: Map<String, Boolean> ->
-        // Notifications are optional; every other permission is required.
         val needed: Map<String, Boolean> =
             results.filterKeys { name -> name != Manifest.permission.POST_NOTIFICATIONS }
         if (needed.values.all { granted -> granted }) {
@@ -195,6 +220,15 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
                     onStopShare = { vm.stopSharingLocation() },
                     onBack = { showLocation = false }
                 )
+            } else if (showAbout) {
+                AboutScreen(onBack = { showAbout = false })
+            } else if (showSettings) {
+                SettingsScreen(
+                    themeMode = themeMode,
+                    onThemeChange = onThemeChange,
+                    onAbout = { showAbout = true },
+                    onBack = { showSettings = false }
+                )
             } else if (currentChat != null) {
                 val chatDevice: ConnectedDevice? =
                     connected.firstOrNull { device -> device.endpointId == currentChat }
@@ -222,6 +256,7 @@ fun NearbyScreen(vm: HamrahViewModel = viewModel()) {
                     nearby = nearby,
                     onSos = { showSos = true },
                     onLocation = { showLocation = true },
+                    onSettings = { showSettings = true },
                     onStart = { permissionLauncher.launch(requiredPermissions()) },
                     onStop = { vm.stop() },
                     onAccept = { id: String -> vm.accept(id) },
