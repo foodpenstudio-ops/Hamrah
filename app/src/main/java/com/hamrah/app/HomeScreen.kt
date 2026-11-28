@@ -38,6 +38,7 @@ fun HomeScreen(
     connected: List<ConnectedDevice>,
     nearby: List<DiscoveredDevice>,
     onSos: () -> Unit,
+    onLocation: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onAccept: (String) -> Unit,
@@ -75,6 +76,12 @@ fun HomeScreen(
                 fontWeight = FontWeight.Bold
             )
         }
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedButton(
+            onClick = onLocation,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Location sharing") }
         Spacer(modifier = Modifier.height(12.dp))
 
         OutlinedTextField(
