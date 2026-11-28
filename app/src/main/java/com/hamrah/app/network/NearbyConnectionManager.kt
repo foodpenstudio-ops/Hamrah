@@ -53,12 +53,26 @@ data class ChatMessage(
     val peerName: String = ""
 )
 
+data class EmergencyAlert(
+    val id: String,
+    val endpointId: String,
+    val senderName: String,
+    val text: String,
+    val timestamp: Long,
+    val mine: Boolean,
+    val cancelled: Boolean = false,
+    val acknowledgedBy: List<String> = emptyList(),
+    val acknowledgedByMe: Boolean = false
+)
+
 class NearbyConnectionManager(context: Context) {
 
     companion object {
         const val SERVICE_ID = "com.hamrah.app.nearby"
         const val MAX_MESSAGE_LENGTH = 1000
+        const val MAX_SOS_LENGTH = 200
         const val MAX_PAYLOAD_BYTES = 8192
+        const val SOS_COOLDOWN_MS = 10_000L
     }
 
     private val client: ConnectionsClient =
@@ -70,6 +84,7 @@ class NearbyConnectionManager(context: Context) {
     private val strategy = Strategy.P2P_CLUSTER
 
     private var localName: String = "Hamrah user"
+    private var lastSosTime: Long = 0L
 
     // Remembers which sent payload belongs to which message.
     private val outgoing = mutableMapOf<Long, String>()
@@ -85,6 +100,9 @@ class NearbyConnectionManager(context: Context) {
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
+
+    private val _alerts = MutableStateFlow<List<EmergencyAlert>>(emptyList())
+    val alerts: StateFlow<List<EmergencyAlert>> = _alerts.asStateFlow()
 
     private val _status = MutableStateFlow("Not started")
     val status: StateFlow<String> = _status.asStateFlow()
@@ -166,6 +184,75 @@ class NearbyConnectionManager(context: Context) {
         }
     }
 
+    private fun peerNameFor(endpointId: String): String {
+        return _connected.value.firstOrNull { d -> d.endpointId == endpointId }?.name
+            ?: "Unknown"
+    }
+
+    private fun updateAlert(alertId: String, change: (EmergencyAlert) -> EmergencyAlert) {
+        _alerts.update { list ->
+            list.map { a -> if (a.id == alertId) change(a) else a }
+        }
+    }
+
+    private fun handleChatMessage(endpointId: String, json: JSONObject) {
+        val id = json.optString("id").trim()
+        val text = json.optString("text").trim()
+        if (id.isEmpty() || id.length > 64) return
+        if (text.isEmpty() || text.length > MAX_MESSAGE_LENGTH) return
+        if (_messages.value.any { m -> m.id == id }) return
+
+        val senderName = peerNameFor(endpointId)
+        val message = ChatMessage(
+            id = id,
+            endpointId = endpointId,
+            senderName = senderName,
+            text = text,
+            timestamp = System.currentTimeMillis(),
+            mine = false,
+            status = MessageStatus.RECEIVED,
+            peerName = senderName
+        )
+        _messages.update { list -> list + message }
+        saveMessage(message)
+    }
+
+    private fun handleSos(endpointId: String, json: JSONObject) {
+        val id = json.optString("id").trim()
+        val text = json.optString("text").trim()
+        if (id.isEmpty() || id.length > 64) return
+        if (text.isEmpty() || text.length > MAX_SOS_LENGTH) return
+        if (_alerts.value.any { a -> a.id == id }) return
+
+        val senderName = peerNameFor(endpointId)
+        val alert = EmergencyAlert(
+            id = id,
+            endpointId = endpointId,
+            senderName = senderName,
+            text = text,
+            timestamp = System.currentTimeMillis(),
+            mine = false
+        )
+        _alerts.update { list -> list + alert }
+        _status.value = "EMERGENCY from $senderName"
+    }
+
+    private fun handleAck(endpointId: String, json: JSONObject) {
+        val id = json.optString("id").trim()
+        val ackName = peerNameFor(endpointId)
+        val alert = _alerts.value.firstOrNull { a -> a.id == id && a.mine } ?: return
+        if (alert.acknowledgedBy.contains(ackName)) return
+        updateAlert(id) { a -> a.copy(acknowledgedBy = a.acknowledgedBy + ackName) }
+    }
+
+    private fun handleCancel(endpointId: String, json: JSONObject) {
+        val id = json.optString("id").trim()
+        val alert = _alerts.value.firstOrNull { a -> a.id == id && !a.mine } ?: return
+        // Only the phone that sent the alert may cancel it.
+        if (alert.endpointId != endpointId) return
+        updateAlert(id) { a -> a.copy(cancelled = true) }
+    }
+
     private val payloadCallback = object : PayloadCallback() {
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
             if (payload.type != Payload.Type.BYTES) return
@@ -174,30 +261,15 @@ class NearbyConnectionManager(context: Context) {
 
             try {
                 val json = JSONObject(String(bytes, Charsets.UTF_8))
-                if (json.optString("t") != "msg") return
-
-                val id = json.optString("id").trim()
-                val text = json.optString("text").trim()
-                if (id.isEmpty() || id.length > 64) return
-                if (text.isEmpty() || text.length > MAX_MESSAGE_LENGTH) return
-
-                if (_messages.value.any { m -> m.id == id }) return
-
-                val senderName = _connected.value
-                    .firstOrNull { d -> d.endpointId == endpointId }?.name ?: "Unknown"
-
-                val message = ChatMessage(
-                    id = id,
-                    endpointId = endpointId,
-                    senderName = senderName,
-                    text = text,
-                    timestamp = System.currentTimeMillis(),
-                    mine = false,
-                    status = MessageStatus.RECEIVED,
-                    peerName = senderName
-                )
-                _messages.update { list -> list + message }
-                saveMessage(message)
+                when (json.optString("t")) {
+                    "msg" -> handleChatMessage(endpointId, json)
+                    "sos" -> handleSos(endpointId, json)
+                    "ack" -> handleAck(endpointId, json)
+                    "cancel" -> handleCancel(endpointId, json)
+                    else -> {
+                        // Unknown type: ignore.
+                    }
+                }
             } catch (e: Exception) {
                 // Ignore anything that is not a valid Hamrah message.
             }
@@ -348,8 +420,7 @@ class NearbyConnectionManager(context: Context) {
         val clean = text.trim()
         if (clean.isEmpty() || clean.length > MAX_MESSAGE_LENGTH) return
 
-        val peerName = _connected.value
-            .firstOrNull { d -> d.endpointId == endpointId }?.name ?: "Unknown"
+        val peerName = peerNameFor(endpointId)
 
         val id = UUID.randomUUID().toString()
         val json = JSONObject()
@@ -377,5 +448,73 @@ class NearbyConnectionManager(context: Context) {
                 outgoing.remove(payload.id)
                 setMessageStatus(id, MessageStatus.FAILED)
             }
+    }
+
+    fun sendSos(text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty() || clean.length > MAX_SOS_LENGTH) return
+
+        val targets: List<String> = _connected.value.map { d -> d.endpointId }
+        if (targets.isEmpty()) {
+            _status.value = "SOS not sent: no connected phones"
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        if (now - lastSosTime < SOS_COOLDOWN_MS) {
+            _status.value = "SOS was just sent. Please wait a few seconds."
+            return
+        }
+        lastSosTime = now
+
+        val id = UUID.randomUUID().toString()
+        val json = JSONObject()
+            .put("t", "sos")
+            .put("id", id)
+            .put("text", clean)
+        val payload = Payload.fromBytes(json.toString().toByteArray(Charsets.UTF_8))
+
+        val alert = EmergencyAlert(
+            id = id,
+            endpointId = "",
+            senderName = localName,
+            text = clean,
+            timestamp = now,
+            mine = true
+        )
+        _alerts.update { list -> list + alert }
+        _status.value = "SOS sent to ${targets.size} connected phone(s)"
+
+        client.sendPayload(targets, payload)
+            .addOnFailureListener { e ->
+                _status.value = "SOS could not be sent: ${e.message}"
+            }
+    }
+
+    fun cancelSos(alertId: String) {
+        val alert = _alerts.value.firstOrNull { a -> a.id == alertId && a.mine } ?: return
+        if (alert.cancelled) return
+        updateAlert(alertId) { a -> a.copy(cancelled = true) }
+
+        val targets: List<String> = _connected.value.map { d -> d.endpointId }
+        if (targets.isEmpty()) return
+
+        val json = JSONObject()
+            .put("t", "cancel")
+            .put("id", alertId)
+        val payload = Payload.fromBytes(json.toString().toByteArray(Charsets.UTF_8))
+        client.sendPayload(targets, payload)
+    }
+
+    fun acknowledgeAlert(alertId: String) {
+        val alert = _alerts.value.firstOrNull { a -> a.id == alertId && !a.mine } ?: return
+        if (alert.acknowledgedByMe) return
+        updateAlert(alertId) { a -> a.copy(acknowledgedByMe = true) }
+
+        val json = JSONObject()
+            .put("t", "ack")
+            .put("id", alertId)
+        val payload = Payload.fromBytes(json.toString().toByteArray(Charsets.UTF_8))
+        client.sendPayload(alert.endpointId, payload)
     }
 }
